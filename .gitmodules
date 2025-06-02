@@ -1,0 +1,6 @@
+[submodule "Grounded-SAM-2"]
+	path = Grounded-SAM-2
+	url = git@github.com:IDEA-Research/Grounded-SAM-2.git
+[submodule "sdxl-unbox"]
+	path = sdxl-unbox
+	url = git@github.com:surkovv/sdxl-unbox.git
