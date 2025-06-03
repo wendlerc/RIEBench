@@ -73,7 +73,12 @@ This will result in a bunch of subfolders containing the resulting images in `re
 
 ## Computing the metrics
 
-Using ... you can compute the LPIPS and CLIP scores for a method/result folder.
+In order to compute the metrics, we need to create the reference images.
+```
+papermill create_reference.ipynb out/create_reference.ipynb
+```
+
+Then, using ... you can compute the LPIPS and CLIP scores for a method/result folder.
 
 # Citation
 
