@@ -4,6 +4,9 @@ A simple benchmark for turning on/off different types of features in SDXL Turbo 
 
 ![image](https://github.com/user-attachments/assets/7cc9d9df-15a4-44da-a325-0b072429ffdf)
 
+![image](https://github.com/user-attachments/assets/eb36211c-68cd-41e0-b14a-4e158c65ee57)
+
+
 
 # Installation
 
