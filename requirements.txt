@@ -1,0 +1,5 @@
+supervision==0.25.1
+pycocotools==2.0.9
+addict==2.4.0
+yapf==0.43.0
+papermill==2.6.0
