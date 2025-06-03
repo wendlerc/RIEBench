@@ -3,3 +3,4 @@ pycocotools==2.0.9
 addict==2.4.0
 yapf==0.43.0
 papermill==2.6.0
+torchmetrics==1.7.2
