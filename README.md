@@ -1,3 +1,13 @@
+# RIEBench: Representation-based image editing benchmark
+
+A simple benchmark for turning on/off different types of features in SDXL Turbo while generating images.
+
+![image](https://github.com/user-attachments/assets/7cc9d9df-15a4-44da-a325-0b072429ffdf)
+
+![image](https://github.com/user-attachments/assets/eb36211c-68cd-41e0-b14a-4e158c65ee57)
+
+
+
 # Installation
 
 1. Create a new environment (recommended)
@@ -39,6 +49,36 @@ unet.mid_block.attentions.0_k160_hidden5120_auxk256_bs4096_lr0.0001/*,\
 unet.up_blocks.0.attentions.0_k160_hidden5120_auxk256_bs4096_lr0.0001/*,\
 unet.up_blocks.0.attentions.1_k160_hidden5120_auxk256_bs4096_lr0.0001/*"
 ```
+
+# Getting started
+
+## Running the interventions
+
+Transporting 80 SAE features with strength 2
+```
+papermill main.ipynb out/main.ipynb -p k_trans 80 -p m1 2
+```
+
+Transporting 10000 neurons with strength 2
+```
+papermill main.ipynb out/main.ipynb -p k_trans 10000 -p m1 2 -p mode neurons
+```
+
+Steering
+```
+papermill main.ipynb out/main.ipynb -p m1 1 -p mode steering
+```
+
+This will result in a bunch of subfolders containing the resulting images in `results`.
+
+## Computing the metrics
+
+In order to compute the metrics, we need to create the reference images.
+```
+papermill create_reference.ipynb out/create_reference.ipynb
+```
+
+Then, using ... you can compute the LPIPS and CLIP scores for a method/result folder.
 
 # Citation
 
