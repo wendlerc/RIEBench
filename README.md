@@ -40,6 +40,27 @@ unet.up_blocks.0.attentions.0_k160_hidden5120_auxk256_bs4096_lr0.0001/*,\
 unet.up_blocks.0.attentions.1_k160_hidden5120_auxk256_bs4096_lr0.0001/*"
 ```
 
+# RIEBench
+
+## Running the interventions
+
+Transporting 80 SAE features with strength 2
+```
+papermill main.ipynb out/main.ipynb -p k_trans 80 -p m1 2
+```
+
+Transporting 10000 neurons with strength 2
+```
+papermill main.ipynb out/main.ipynb -p k_trans 10000 -p m1 2 -p mode neurons
+```
+
+Steering
+```
+papermill main.ipynb out/main.ipynb -p m1 1 -p mode steering
+```
+
+## Computing the metrics
+
 # Citation
 
 ```
