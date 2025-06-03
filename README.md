@@ -1,3 +1,7 @@
+# RIEBench: Representation-based image editing benchmark
+
+A simple benchmark for turning on/off different types of features in SDXL Turbo while generating images.
+
 # Installation
 
 1. Create a new environment (recommended)
@@ -40,7 +44,7 @@ unet.up_blocks.0.attentions.0_k160_hidden5120_auxk256_bs4096_lr0.0001/*,\
 unet.up_blocks.0.attentions.1_k160_hidden5120_auxk256_bs4096_lr0.0001/*"
 ```
 
-# RIEBench
+# Getting started
 
 ## Running the interventions
 
@@ -59,7 +63,11 @@ Steering
 papermill main.ipynb out/main.ipynb -p m1 1 -p mode steering
 ```
 
+This will result in a bunch of subfolders containing the resulting images in `results`.
+
 ## Computing the metrics
+
+Using ... you can compute the LPIPS and CLIP scores for a method/result folder.
 
 # Citation
 
