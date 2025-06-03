@@ -78,7 +78,11 @@ In order to compute the metrics, we need to create the reference images.
 papermill create_reference.ipynb out/create_reference.ipynb
 ```
 
-Then, using ... you can compute the LPIPS and CLIP scores for a method/result folder.
+Now, you can compute the LPIPS and CLIP scores for a method/result folder. E.g., assuming you ran with above hyperparameters.
+```
+papermill score.ipynb out/score.ipynb -p path ./results/modesae_spatialTrue_subtractTrue_downTrue_upTrue_up0True_midTrue_T4_ktrans80_str2.0 -p name sae_80_2
+```
+This will create a `sae_80_2.csv` in the corresponding result folder.
 
 # Citation
 
