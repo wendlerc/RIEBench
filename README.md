@@ -2,6 +2,9 @@
 
 A simple benchmark for turning on/off different types of features in SDXL Turbo while generating images.
 
+![image](https://github.com/user-attachments/assets/7cc9d9df-15a4-44da-a325-0b072429ffdf)
+
+
 # Installation
 
 1. Create a new environment (recommended)
