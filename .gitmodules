@@ -4,3 +4,4 @@
 [submodule "sdxl-unbox"]
 	path = sdxl-unbox
 	url = git@github.com:surkovv/sdxl-unbox.git
+	branch = flux_integration
