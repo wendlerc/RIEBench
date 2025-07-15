@@ -131,9 +131,6 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
 
     dim = int(np.sqrt(cache1.image_residual[0].shape[1]))
 
-    if np.allclose(cache1.image_residual[0].detach().cpu().float().numpy(), cache2.image_residual[0].detach().cpu().float().numpy(), atol=1e-3):
-        raise AssertionError("The image residuals are the same between the two prompts.")
-
     logger.debug("Running Grounded SAM on generated images...")
     if gsam_prompt1 == "#everything":
         mask1 = np.ones((dim, dim), dtype=bool)
