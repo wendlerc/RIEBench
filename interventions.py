@@ -7,6 +7,41 @@ from functools import partial
 import json
 from gsam_utils import sam_mask, resize_mask
 from typing import Literal
+import inspect
+
+class TimedHook:
+    def __init__(self, hook_fn, total_steps, apply_at_steps=None):
+        # check the signature of hook_fn
+        if len(inspect.signature(hook_fn).parameters) != 4:
+            raise ValueError(f"hook_fn must have 4 parameters: module, input, output, step_idx")
+        self.hook_fn = hook_fn
+        self.total_steps = total_steps
+        self.apply_at_steps = apply_at_steps
+        self.current_step = 0
+
+    def identity(self, module, input, output):
+        return output
+
+    def __call__(self, module, input, output):
+        if self.apply_at_steps is not None:
+            if self.current_step in self.apply_at_steps:
+                res = self.hook_fn(module, input, output, self.current_step)
+                self.__increment()
+                return res
+            else:
+                res = self.identity(module, input, output)
+                self.__increment()
+                return res
+
+        res = self.identity(module, input, output)
+        self.__increment()
+        return res
+
+    def __increment(self):
+        if self.current_step < self.total_steps:
+            self.current_step += 1
+        else:
+            self.current_step = 0
 
 
 logger = logging.getLogger(__name__)
@@ -19,10 +54,10 @@ code_to_block = {
 }
 
 def add_featuremaps(sae, to_source_features, to_target_features, m1, fmaps, target_mask,  
-                    maintain_spatial_info, module, input, output):
+                    maintain_spatial_info, module, input, output, step_idx):
     diff = output[0] - input[0]
     coefs = sae.encode(diff.permute(0, 2, 3, 1))
-    mask = torch.zeros([fmaps.shape[0], fmaps.shape[1], fmaps.shape[2], sae.decoder.weight.shape[1]], device=input[0].device)
+    mask = torch.zeros([1, fmaps.shape[1], fmaps.shape[2], sae.decoder.weight.shape[1]], device=input[0].device)
     # norm adjustment not needed because the columns have norm 1 already!
     norm_source = sae.decoder.weight[:, to_source_features].norm(dim=0).sum(dim=0)
     norm_target = sae.decoder.weight[:, to_target_features].norm(dim=0).sum(dim=0)
@@ -35,16 +70,16 @@ def add_featuremaps(sae, to_source_features, to_target_features, m1, fmaps, targ
     if not maintain_spatial_info:
         target_update[:, target_mask] = target_update[:, target_mask].mean(dim=1, keepdim=True)
     mask[..., to_target_features] -= target_update
-    mask[..., to_source_features] += fmaps.to(mask.device)
+    mask[..., to_source_features] += fmaps[step_idx].unsqueeze(0).to(mask.device)
     to_add = mask.to(sae.decoder.weight.dtype) @ sae.decoder.weight.T
     return (output[0] + to_add.permute(0, 3, 1, 2).to(output[0].device),)
 
 
-def add_activations(delta, module, input, output):
+def add_activations(delta, module, input, output, step_idx):
     if isinstance(output, torch.Tensor):
-        return output + delta
+        return output + delta[step_idx]
     else:  
-        return (output[0] + delta,)
+        return (output[0] + delta[step_idx],)
 
 def best_features_saeuron(source_feats, target_feats, k=10, aggregate_timesteps: Literal["first", "mean"] = "first"):
     assert len(source_feats.shape) == 3 and len(target_feats.shape) == 3, "source_feats and target_feats must be of shape (timesteps, spatial_locations, features)"
@@ -211,6 +246,7 @@ def setup_neuron_interventions(blocks_to_intervene,
                                stat, 
                                subtract_target_add_source, 
                                maintain_spatial_info,
+                               n_steps,
                                device):
     interventions = {}
     for shortcut in blocks_to_intervene:
@@ -225,41 +261,60 @@ def setup_neuron_interventions(blocks_to_intervene,
 
             if stat == "quantile":
                 dtype = source_neurons.dtype
-                stat1_val = source_neurons.float().quantile(0.95, dim=1).mean(dim=0)
-                stat1_val = stat1_val.to(dtype)[to_source_neurons]
-                stat2_val = target_neurons.float().quantile(0.95, dim=1).mean(dim=0)
-                stat2_val = stat2_val.to(dtype)[to_target_neurons] 
+                stat1_val = source_neurons.float().quantile(0.95, dim=1)
+                stat1_val = stat1_val.to(dtype)[:, to_source_neurons]
+                stat2_val = target_neurons.float().quantile(0.95, dim=1)
+                stat2_val = stat2_val.to(dtype)[:, to_target_neurons] 
+            elif stat == "mean":
+                stat1_val = source_neurons.mean(dim=1)
+                stat1_val = stat1_val[:, to_source_neurons]
+                stat2_val = target_neurons.mean(dim=1)
+                stat2_val = stat2_val[:, to_target_neurons]
             else:
                 raise ValueError(f"stat {stat} not supported")
-
+            # TODO: continue from here
+            fmaps = torch.zeros((n_steps, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
+            fmaps2 = torch.zeros((n_steps, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
+            # example source_neurons shape torch.Size([4, 107, 5120])
             if subtract_target_add_source:        
-                fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
                 if maintain_spatial_info:
-                    fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
-                    for i, idx in enumerate(to_source_neurons):
-                        fmaps[:, mask1.flatten(), idx] += m1 * source_neurons[..., idx].mean(dim=0, keepdim=True).to(fmaps.device)
-                    for i, idx in enumerate(to_target_neurons):
-                        fmaps[:, mask2.flatten(), idx] -= m1 * target_neurons[..., idx].mean(dim=0, keepdim=True).to(fmaps.device)
+                    source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    source_update[:, mask1.flatten(), :] = m1*source_neurons.to(device)
+                    target_update[:, mask2.flatten(), :] = m1*target_neurons.to(device)
+                    fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
+                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
                 else:
-                    for i, idx in enumerate(to_source_neurons):
-                        fmaps[:, mask1.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
-                    for i, idx in enumerate(to_target_neurons):
-                        fmaps[:, mask2.flatten(), idx] -= (m1*stat2_val[i]).to(fmaps.device) 
+                    source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    source_update[..., to_source_neurons] = m1*stat1_val.unsqueeze(1).to(device)
+                    target_update[..., to_target_neurons] = m1*stat2_val.unsqueeze(1).to(device)
+                    source_update[:, ~mask1.flatten(), :] = 0
+                    target_update[:, ~mask2.flatten(), :] = 0
+                    fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
+                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
             else:
                 if maintain_spatial_info:
-                    fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
-                    for i, idx in enumerate(to_source_neurons):
-                        fmaps[:, mask2.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
-                    for i, idx in enumerate(to_target_neurons):
-                        fmaps[:, mask2.flatten(), idx] -= m1 * target_neurons[..., idx].mean(dim=0, keepdim=True).to(fmaps.device)
+                    source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    source_update[..., to_source_neurons] = m1*stat1_val.unsqueeze(1).to(device)
+                    source_update[:, ~mask2.flatten(), :] = 0
+                    target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    target_update[:, mask2.flatten(), :] = m1*target_neurons.to(device)
+                    fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
+                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
                 else:
-                    fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
-                    for i, idx in enumerate(to_source_neurons):
-                        fmaps[:, mask2.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
-                    for i, idx in enumerate(to_target_neurons):
-                        fmaps[:, mask2.flatten(), idx] -= (m1*stat2_val[i]).to(fmaps.device) 
+                    source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
+                    source_update[..., to_source_neurons] = m1*stat1_val.unsqueeze(1).to(device)
+                    target_update[..., to_target_neurons] = m1*stat2_val.unsqueeze(1).to(device)
+                    source_update[:, ~mask2.flatten(), :] = 0
+                    target_update[:, ~mask2.flatten(), :] = 0
+                    fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
+                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
+                    
             f = partial(add_activations, fmaps)
-            interventions[layer] = f
+            hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
+            interventions[layer] = hook
     return interventions
 
 def setup_activation_interventions(blocks_to_intervene, 
@@ -277,6 +332,7 @@ def setup_activation_interventions(blocks_to_intervene,
                                    maintain_spatial_info, 
                                    mode,
                                    saes,
+                                   n_steps,
                                    device):
     interventions = {}
     for shortcut in blocks_to_intervene:
@@ -292,63 +348,55 @@ def setup_activation_interventions(blocks_to_intervene,
         block = code_to_block[shortcut]
         logger.debug("Selecting best features...")
 
-        # use max
+        # source_feates example shape torch.Size([4, 135, 5120])
         if stat == "max":
-            stat1_val = source_feats.max(dim=0)[0].max(dim=0)[0][to_source_features]
-            stat2_val = target_feats.max(dim=0)[0].max(dim=0)[0][to_target_features]
+            stat1_val = source_feats.max(dim=1)[0][:, to_source_features]
+            stat2_val = target_feats.max(dim=1)[0][:, to_target_features]
         elif stat == "mean":
-            mymeans1 = []
-            for fidx in to_source_features:
-                coefs = source_feats[..., fidx]
-                mymeans1.append(coefs[coefs > 1e-3].mean())
-            stat1_val = torch.tensor(mymeans1, device=device)
-            mymeans2 = []
-            for fidx in to_target_features:
-                coefs = target_feats[..., fidx]
-                mymeans2.append(coefs[coefs > 1e-3].mean())
-            stat2_val = torch.tensor(mymeans2, device=device)
+            stat1_val = source_feats.mean(dim=1)[:, to_source_features]
+            stat2_val = target_feats.mean(dim=1)[:, to_target_features]
         elif stat == "quantile":
             logger.debug(f"source_feats shape: {source_feats.shape}")
             dtype = source_feats.dtype
-            stat1_val = source_feats.float().quantile(0.95, dim=1).mean(dim=0)
-            stat1_val = stat1_val.to(dtype)[to_source_features]
-            stat2_val = target_feats.float().quantile(0.95, dim=1).mean(dim=0)
-            stat2_val = stat2_val.to(dtype)[to_target_features]
+            stat1_val = source_feats.float().quantile(0.95, dim=1)
+            stat1_val = stat1_val.to(dtype)[:, to_source_features]
+            stat2_val = target_feats.float().quantile(0.95, dim=1)
+            stat2_val = stat2_val.to(dtype)[:, to_target_features]
         else:
             ValueError(f"stat1 {stat} not recognized. Choose from: max, mean")
         logger.debug("Running SDXL with feature injection...")
 
         if mode == "steering":
-            # create the batch x feats x y x x tensor to add
-            delta = torch.zeros((1, 1280, 16, 16), dtype=source.dtype, device=device)
+            delta = torch.zeros((n_steps, 1280, 16, 16), dtype=source.dtype, device=device)
             if subtract_target_add_source:
                 if maintain_spatial_info:
-                    delta[:, :, mask1] += m1*source.mean(dim=0, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).to(delta.device)
+                    delta[:, :, mask1] += m1*source.to(delta.device)
+                    delta[:, :, mask2] -= m1*target.to(delta.device)
                 else:
-                    delta[:, :, mask1] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask1] += m1*source.mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] -= m1*target.mean(dim=2, keepdim=True).to(delta.device)
             else:
                 if maintain_spatial_info:
-                    delta[:, :, mask2] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] += m1*source.mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] -= m1*target.to(delta.device)
                 else:
-                    delta[:, :, mask2] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] += m1*source.mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] -= m1*target.mean(dim=2, keepdim=True).to(delta.device)
             f = partial(add_activations, delta)
-            interventions[block] = f
+            hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
+            interventions[block] = hook
         elif mode == "sae":
+            fmaps = torch.zeros((n_steps, 16, 16, len(to_source_features)), device=device)
             if subtract_target_add_source:       
-                fmaps = torch.zeros((1, 16, 16, len(to_source_features)), device=device)
                 if maintain_spatial_info:
-                    fmaps[:, mask1] += m1*source_feats.mean(dim=0, keepdim=True)[..., to_source_features].to(fmaps.device)
-                else:
-                    fmaps[:, mask1] += (m1*stat1_val).unsqueeze(0).unsqueeze(0).to(fmaps.device)
-            else:
-                fmaps = torch.zeros((1, 16, 16, len(to_source_features)), device=device)
-                fmaps[:, mask2] += (m1*stat1_val).unsqueeze(0).unsqueeze(0).to(fmaps.device)
+                    fmaps[:, mask1] += m1*source_feats[..., to_source_features].to(fmaps.device)
+                else: 
+                    fmaps[:, mask1] += (m1*stat1_val).unsqueeze(1).to(fmaps.device)
+            else: 
+                fmaps[:, mask2] += (m1*stat1_val).unsqueeze(1).to(fmaps.device)
             f = partial(add_featuremaps, sae, to_source_features, to_target_features, m1, fmaps, mask2, maintain_spatial_info)
-            interventions[block] = f
+            hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
+            interventions[block] = hook
         else:
             ValueError(f"Mode {mode} not recognized. Choose from: patch_max, patch_mean, sae, neurons, steer")
     return interventions
@@ -486,7 +534,8 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
                                                        subtract_target_add_source, 
                                                        maintain_spatial_info, 
                                                        mode,
-                                                       saes, 
+                                                       saes,
+                                                       n_steps, 
                                                        device)
     else:
         interventions = setup_neuron_interventions(blocks_to_intervene, 
@@ -500,6 +549,7 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
                                                    stat, 
                                                    subtract_target_add_source, 
                                                    maintain_spatial_info, 
+                                                   n_steps,
                                                    device)
                 
 
