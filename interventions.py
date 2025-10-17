@@ -6,6 +6,8 @@ import cv2
 from functools import partial
 import json
 from gsam_utils import sam_mask, resize_mask
+from typing import Literal
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +46,19 @@ def add_activations(delta, module, input, output):
     else:  
         return (output[0] + delta,)
 
-def best_features_saeuron(source_feats, target_feats, k=10):
-    mean_source = source_feats.mean(dim=0).mean(dim=0)
-    mean_target = target_feats.mean(dim=0).mean(dim=0)
+def best_features_saeuron(source_feats, target_feats, k=10, aggregate_timesteps: Literal["first", "mean"] = "first"):
+    assert len(source_feats.shape) == 3 and len(target_feats.shape) == 3, "source_feats and target_feats must be of shape (timesteps, spatial_locations, features)"
+    if aggregate_timesteps == "first":
+        source_feats = source_feats[0]
+        target_feats = target_feats[0]
+    elif aggregate_timesteps == "mean":
+        source_feats = source_feats.mean(dim=0)
+        target_feats = target_feats.mean(dim=0)
+    else:
+        raise ValueError(f"aggregate_timesteps {aggregate_timesteps} not supported")
+    # now the first axis is the spatial locations, over which we just take the mean
+    mean_source = source_feats.mean(dim=0)
+    mean_target = target_feats.mean(dim=0)
     scores = mean_source/mean_source.sum() - mean_target/mean_target.sum()
     arg_sorted = np.argsort(scores.cpu().detach().numpy())
     return arg_sorted[::-1][:k].copy(), arg_sorted[:k].copy()
@@ -59,7 +71,9 @@ def best_features_neuron(source_feats, target_feats, k=10):
     return arg_sorted[::-1][:k].copy(), arg_sorted[:k].copy()
 
 @torch.no_grad()
-def get_features_per_block(cache1, cache2, mask1, mask2, k_transfer=None, blocks_to_intervene=None, saes=None):
+def get_features_per_block(cache1, cache2, mask1, mask2, 
+                           k_transfer=None, blocks_to_intervene=None, saes=None,
+                           aggregate_timesteps: Literal["first", "mean"] = "first"):
     to_source_features_dict = {}
     to_target_features_dict = {}
     source_feats_dict = {}
@@ -75,7 +89,7 @@ def get_features_per_block(cache1, cache2, mask1, mask2, k_transfer=None, blocks
         sae = saes[shortcut]
         source_feats = sae.encode(source.permute(0, 2, 1))
         target_feats = sae.encode(target.permute(0, 2, 1))
-        to_source_features, to_target_features = best_features_saeuron(source_feats, target_feats, k=k_transfer)
+        to_source_features, to_target_features = best_features_saeuron(source_feats, target_feats, k=k_transfer, aggregate_timesteps=aggregate_timesteps)
         to_source_features_dict[shortcut] = to_source_features
         to_target_features_dict[shortcut] = to_target_features
         source_feats_dict[shortcut] = source_feats.detach().cpu()
@@ -86,7 +100,7 @@ def get_features_per_block(cache1, cache2, mask1, mask2, k_transfer=None, blocks
     
 @torch.no_grad()
 def get_features_all_blocks(cache1, cache2, mask1, mask2, k_transfer=None, blocks_to_intervene=None, saes=None,
-                            normalize=False):
+                            normalize=False, aggregate_timesteps: Literal["first", "mean"] = "first"):
     source_feats_all = []
     target_feats_all = []
     to_source_feats_dict = {}
@@ -98,6 +112,8 @@ def get_features_all_blocks(cache1, cache2, mask1, mask2, k_transfer=None, block
     block_sizes = {}
     for shortcut in blocks_to_intervene:
         block = code_to_block[shortcut]
+        # cache1['output'][block] is of shape (batch, timesteps, channels, width, height) = (1, 4, 1280, 16, 16)
+        # we assume batch size is 1 --> we index into the first element of the batch
         diff1 = cache1['output'][block][0] - cache1['input'][block][0]
         diff2 = cache2['output'][block][0] - cache2['input'][block][0]
         source = diff1[:, :, mask1]
@@ -118,7 +134,7 @@ def get_features_all_blocks(cache1, cache2, mask1, mask2, k_transfer=None, block
         block_sizes[shortcut] = source_feats.shape[-1]
     source_feats_all = torch.cat(source_feats_all, dim=-1)
     target_feats_all = torch.cat(target_feats_all, dim=-1)
-    to_source_feats_all, to_target_feats_all = best_features_saeuron(source_feats_all, target_feats_all, k=k_transfer)
+    to_source_feats_all, to_target_feats_all = best_features_saeuron(source_feats_all, target_feats_all, k=k_transfer, aggregate_timesteps=aggregate_timesteps)
     start = 0
     for idx, shortcut in enumerate(blocks_to_intervene):
         to_source_feats = []
@@ -140,7 +156,7 @@ def get_neuron_layer_name(block, lidx):
 
 @torch.no_grad()
 def get_neurons_all_blocks(cache1, cache2, mask1, mask2, k_transfer=None, blocks_to_intervene=None, saes=None,
-                            normalize=True):
+                            normalize=True, aggregate_timesteps: Literal["first", "mean"] = "first"):
     to_source_neurons_dict = {}
     to_target_neurons_dict = {}
     source_dict = {}
@@ -166,7 +182,7 @@ def get_neurons_all_blocks(cache1, cache2, mask1, mask2, k_transfer=None, blocks
             block_sizes[layer] = neurons1.shape[-1]
     neurons1_all = torch.cat(neurons1_all, dim=-1)
     neurons2_all = torch.cat(neurons2_all, dim=-1)
-    to_source_neurons_all, to_target_neurons_all = best_features_saeuron(neurons1_all, neurons2_all, k=k_transfer)
+    to_source_neurons_all, to_target_neurons_all = best_features_saeuron(neurons1_all, neurons2_all, k=k_transfer, aggregate_timesteps=aggregate_timesteps)
     start = 0
     for idx, shortcut in enumerate(blocks_to_intervene):
         for lidx in range(10):
@@ -337,11 +353,16 @@ def setup_activation_interventions(blocks_to_intervene,
             ValueError(f"Mode {mode} not recognized. Choose from: patch_max, patch_mean, sae, neurons, steer")
     return interventions
 
+
 def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, grounding_model, sam2_predictor, saes,
          blocks_to_intervene=["down.2.1", "up.0.1", "up.0.0", "mid.0"],
-         n_steps=1, m1=1., k_transfer=10, stat="quantile", mode="sae",  
+         n_steps=1, m1=1., k_transfer=10, 
+         stat: Literal["max", "mean", "quantile"] = "quantile", 
+         mode: Literal["steering", "sae", "neurons"] = "sae",  
          combine_blocks=True, use_source_mask_in_both=False, subtract_target_add_source=False,
-         maintain_spatial_info=False, verbose=False,
+         maintain_spatial_info=False, 
+         aggregate_timesteps: Literal["first", "mean"] = "first", 
+         verbose=False,
          BOX_THRESHOLD=0.25, TEXT_THRESHOLD=0.25,
          result_name=None):
 
@@ -435,13 +456,20 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
     
     if mode == "neurons":
         to_source_features_dict, to_target_features_dict, source_feats_dict, target_feats_dict = \
-            get_neurons_all_blocks(cache1, cache2, mask1, mask2, k_transfer=k_transfer, blocks_to_intervene=blocks_to_intervene)
+            get_neurons_all_blocks(cache1, cache2, mask1, mask2, 
+                                   k_transfer=k_transfer, 
+                                   blocks_to_intervene=blocks_to_intervene,
+                                   aggregate_timesteps=aggregate_timesteps)
     elif combine_blocks:
         to_source_features_dict, to_target_features_dict, source_feats_dict, target_feats_dict, source_dict, target_dict = \
-            get_features_all_blocks(cache1, cache2, mask1, mask2, k_transfer=k_transfer, blocks_to_intervene=blocks_to_intervene, saes=saes)
+            get_features_all_blocks(cache1, cache2, mask1, mask2,
+                                   k_transfer=k_transfer, blocks_to_intervene=blocks_to_intervene, saes=saes,
+                                   aggregate_timesteps=aggregate_timesteps)
     else:
         to_source_features_dict, to_target_features_dict, source_feats_dict, target_feats_dict, source_dict, target_dict = \
-            get_features_per_block(cache1, cache2, mask1, mask2, k_transfer=k_transfer, blocks_to_intervene=blocks_to_intervene, saes=saes)
+            get_features_per_block(cache1, cache2, mask1, mask2,
+                                   k_transfer=k_transfer, blocks_to_intervene=blocks_to_intervene, saes=saes,
+                                   aggregate_timesteps=aggregate_timesteps)
 
     if mode != "neurons":
         interventions = setup_activation_interventions(blocks_to_intervene, 
