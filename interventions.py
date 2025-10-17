@@ -16,7 +16,8 @@ code_to_block = {
         "mid.0": "unet.mid_block.attentions.0",
 }
 
-def add_featuremaps(sae, to_source_features, to_target_features, m1, fmaps, target_mask, module, input, output):
+def add_featuremaps(sae, to_source_features, to_target_features, m1, fmaps, target_mask,  
+                    maintain_spatial_info, module, input, output):
     diff = output[0] - input[0]
     coefs = sae.encode(diff.permute(0, 2, 3, 1))
     mask = torch.zeros([fmaps.shape[0], fmaps.shape[1], fmaps.shape[2], sae.decoder.weight.shape[1]], device=input[0].device)
@@ -27,7 +28,11 @@ def add_featuremaps(sae, to_source_features, to_target_features, m1, fmaps, targ
         normadjustment = (norm_source/norm_target)
     else:
         normadjustment = 0
-    mask[0,target_mask][..., to_target_features] -= normadjustment*m1*coefs[0, target_mask][..., to_target_features]
+    target_update = normadjustment*m1*coefs[..., to_target_features] 
+    target_update[:, ~target_mask] = 0
+    if not maintain_spatial_info:
+        target_update[:, target_mask] = target_update[:, target_mask].mean(dim=1, keepdim=True)
+    mask[..., to_target_features] -= target_update
     mask[..., to_source_features] += fmaps.to(mask.device)
     to_add = mask.to(sae.decoder.weight.dtype) @ sae.decoder.weight.T
     return (output[0] + to_add.permute(0, 3, 1, 2).to(output[0].device),)
@@ -222,19 +227,23 @@ def setup_neuron_interventions(blocks_to_intervene,
                 else:
                     for i, idx in enumerate(to_source_neurons):
                         fmaps[:, mask1.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
-                        
+                    for i, idx in enumerate(to_target_neurons):
+                        fmaps[:, mask2.flatten(), idx] -= (m1*stat2_val[i]).to(fmaps.device) 
+            else:
+                if maintain_spatial_info:
+                    fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
+                    for i, idx in enumerate(to_source_neurons):
+                        fmaps[:, mask2.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
                     for i, idx in enumerate(to_target_neurons):
                         fmaps[:, mask2.flatten(), idx] -= m1 * target_neurons[..., idx].mean(dim=0, keepdim=True).to(fmaps.device)
-                f = partial(add_activations, fmaps)
-                interventions[layer] = f
-            else:
-                fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
-                for i, idx in enumerate(to_source_neurons):
-                    fmaps[:, mask2.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
-                for i, idx in enumerate(to_target_neurons):
-                    fmaps[:, mask2.flatten(), idx] -= m1 * target_neurons[..., idx].mean(dim=0, keepdim=True).to(fmaps.device)
-                f = partial(add_activations, fmaps)
-                interventions[layer] = f
+                else:
+                    fmaps = torch.zeros((1, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
+                    for i, idx in enumerate(to_source_neurons):
+                        fmaps[:, mask2.flatten(), idx] += (m1*stat1_val[i]).to(fmaps.device)
+                    for i, idx in enumerate(to_target_neurons):
+                        fmaps[:, mask2.flatten(), idx] -= (m1*stat2_val[i]).to(fmaps.device) 
+            f = partial(add_activations, fmaps)
+            interventions[layer] = f
     return interventions
 
 def setup_activation_interventions(blocks_to_intervene, 
@@ -302,10 +311,14 @@ def setup_activation_interventions(blocks_to_intervene,
                     delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).to(delta.device)
                 else:
                     delta[:, :, mask1] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
             else:
-                delta[:, :, mask2] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
-                delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).to(delta.device)
+                if maintain_spatial_info:
+                    delta[:, :, mask2] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).to(delta.device)
+                else:
+                    delta[:, :, mask2] += m1*source.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
+                    delta[:, :, mask2] -= m1*target.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).to(delta.device)
             f = partial(add_activations, delta)
             interventions[block] = f
         elif mode == "sae":
@@ -315,11 +328,10 @@ def setup_activation_interventions(blocks_to_intervene,
                     fmaps[:, mask1] += m1*source_feats.mean(dim=0, keepdim=True)[..., to_source_features].to(fmaps.device)
                 else:
                     fmaps[:, mask1] += (m1*stat1_val).unsqueeze(0).unsqueeze(0).to(fmaps.device)
-                f = partial(add_featuremaps, sae, to_source_features, to_target_features, m1, fmaps, mask2)
             else:
                 fmaps = torch.zeros((1, 16, 16, len(to_source_features)), device=device)
                 fmaps[:, mask2] += (m1*stat1_val).unsqueeze(0).unsqueeze(0).to(fmaps.device)
-                f = partial(add_featuremaps, sae, to_source_features, to_target_features, m1, fmaps, mask2)
+            f = partial(add_featuremaps, sae, to_source_features, to_target_features, m1, fmaps, mask2, maintain_spatial_info)
             interventions[block] = f
         else:
             ValueError(f"Mode {mode} not recognized. Choose from: patch_max, patch_mean, sae, neurons, steer")
@@ -487,7 +499,7 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
             axs[0].imshow(mask1, alpha=0.5)
         else:
             axs[0].imshow(img1)
-    axs[0].set_title(f"{prompt1}")
+    axs[0].set_title(f"{prompt1}", fontsize=16)
     axs[0].axis('off')
     
     # Image 2 with mask from prompt 2
@@ -503,7 +515,7 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
             axs[1].imshow(mask2, alpha=0.5)
         else:
             axs[1].imshow(img2)
-    axs[1].set_title(f"{prompt2}")
+    axs[1].set_title(f"{prompt2}", fontsize=16)
     axs[1].axis('off')
     
     # Intervened result image
@@ -511,7 +523,8 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
     axs[2].axis('off')
 
     if result_name is not None:
-        plt.savefig(result_name + "_summary.png")
+        plt.tight_layout()
+        plt.savefig(result_name + "_summary.png", bbox_inches='tight')
         plt.close()
         # save the images
         with open(result_name + "_feats_and_stats.json", "w") as f:
