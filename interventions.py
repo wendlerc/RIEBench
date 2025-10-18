@@ -386,6 +386,44 @@ def setup_activation_interventions(blocks_to_intervene,
             hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
             interventions[block] = hook
         elif mode == "sae":
+            delta = torch.zeros((n_steps, 1280, 16, 16), device=device, dtype=source.dtype)
+            if subtract_target_add_source:
+                # sae.decoder.weight example shape torch.Size([1280, 5120]) (this is from an expansion factor 4)
+                # source_feats example shape torch.Size([4, 135, 5120]) 
+                if maintain_spatial_info:
+                    source_update = source_feats[..., to_source_features].to(device) @ sae.decoder.weight.T[to_source_features]
+                    source_update = m1 * source_update.permute(0, 2, 1)
+                    target_update = target_feats[..., to_target_features].to(device) @ sae.decoder.weight.T[to_target_features]
+                    target_update = m1 * target_update.permute(0, 2, 1)
+                    delta[:, :, mask1] += source_update
+                    delta[:, :, mask2] -= target_update
+                else:
+                    source_update = stat1_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_source_features]
+                    source_update = m1 * source_update.permute(0, 2, 1)
+                    target_update = stat2_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_target_features]
+                    target_update = m1 * target_update.permute(0, 2, 1)
+                    delta[:, :, mask1] += source_update
+                    delta[:, :, mask2] -= target_update
+            else:
+                if maintain_spatial_info:
+                    source_update = stat1_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_source_features]
+                    source_update = m1 * source_update.permute(0, 2, 1)
+                    target_update = target_feats[..., to_target_features].to(device) @ sae.decoder.weight.T[to_target_features]
+                    target_update = m1 * target_update.permute(0, 2, 1)
+                    delta[:, :, mask2] += source_update
+                    delta[:, :, mask2] -= target_update
+                else:
+                    source_update = stat1_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_source_features]
+                    source_update = m1 * source_update.permute(0, 2, 1)
+                    target_update = stat2_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_target_features]
+                    target_update = m1 * target_update.permute(0, 2, 1)
+                    delta[:, :, mask2] += source_update
+                    delta[:, :, mask2] -= target_update
+
+            f = partial(add_activations, delta)
+            hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
+            interventions[block] = hook
+        elif mode == "sae_adaptive":
             fmaps = torch.zeros((n_steps, 16, 16, len(to_source_features)), device=device)
             if subtract_target_add_source:       
                 if maintain_spatial_info:
