@@ -247,7 +247,8 @@ def setup_neuron_interventions(blocks_to_intervene,
                                subtract_target_add_source, 
                                maintain_spatial_info,
                                n_steps,
-                               device):
+                               device,
+                               only_add):
     interventions = {}
     for shortcut in blocks_to_intervene:
         for lidx in range(10):
@@ -272,9 +273,7 @@ def setup_neuron_interventions(blocks_to_intervene,
                 stat2_val = stat2_val[:, to_target_neurons]
             else:
                 raise ValueError(f"stat {stat} not supported")
-            # TODO: continue from here
             fmaps = torch.zeros((n_steps, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
-            fmaps2 = torch.zeros((n_steps, 16 * 16, 5120), device=device, dtype=source_neurons.dtype)
             # example source_neurons shape torch.Size([4, 107, 5120])
             if subtract_target_add_source:        
                 if maintain_spatial_info:
@@ -283,7 +282,8 @@ def setup_neuron_interventions(blocks_to_intervene,
                     source_update[:, mask1.flatten(), :] = m1*source_neurons.to(device)
                     target_update[:, mask2.flatten(), :] = m1*target_neurons.to(device)
                     fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
-                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
+                    if not only_add:
+                        fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
                 else:
                     source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
                     target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
@@ -292,7 +292,8 @@ def setup_neuron_interventions(blocks_to_intervene,
                     source_update[:, ~mask1.flatten(), :] = 0
                     target_update[:, ~mask2.flatten(), :] = 0
                     fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
-                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
+                    if not only_add:
+                        fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
             else:
                 if maintain_spatial_info:
                     source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
@@ -301,7 +302,8 @@ def setup_neuron_interventions(blocks_to_intervene,
                     target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
                     target_update[:, mask2.flatten(), :] = m1*target_neurons.to(device)
                     fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
-                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
+                    if not only_add:
+                        fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
                 else:
                     source_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
                     target_update = torch.zeros_like(fmaps, device=device, dtype=source_neurons.dtype)
@@ -310,7 +312,8 @@ def setup_neuron_interventions(blocks_to_intervene,
                     source_update[:, ~mask2.flatten(), :] = 0
                     target_update[:, ~mask2.flatten(), :] = 0
                     fmaps[..., to_source_neurons] += source_update[..., to_source_neurons]
-                    fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
+                    if not only_add:
+                        fmaps[..., to_target_neurons] -= target_update[..., to_target_neurons]
                     
             f = partial(add_activations, fmaps)
             hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
@@ -333,7 +336,8 @@ def setup_activation_interventions(blocks_to_intervene,
                                    mode,
                                    saes,
                                    n_steps,
-                                   device):
+                                   device,
+                                   only_add):
     interventions = {}
     for shortcut in blocks_to_intervene:
         # 1 x 39 x 5120
@@ -371,17 +375,21 @@ def setup_activation_interventions(blocks_to_intervene,
             if subtract_target_add_source:
                 if maintain_spatial_info:
                     delta[:, :, mask1] += m1*source.to(delta.device)
-                    delta[:, :, mask2] -= m1*target.to(delta.device)
+                    if not only_add:
+                        delta[:, :, mask2] -= m1*target.to(delta.device)
                 else:
                     delta[:, :, mask1] += m1*source.mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=2, keepdim=True).to(delta.device)
+                    if not only_add:
+                        delta[:, :, mask2] -= m1*target.mean(dim=2, keepdim=True).to(delta.device)
             else:
                 if maintain_spatial_info:
                     delta[:, :, mask2] += m1*source.mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.to(delta.device)
+                    if not only_add:
+                        delta[:, :, mask2] -= m1*target.to(delta.device)
                 else:
                     delta[:, :, mask2] += m1*source.mean(dim=2, keepdim=True).to(delta.device)
-                    delta[:, :, mask2] -= m1*target.mean(dim=2, keepdim=True).to(delta.device)
+                    if not only_add:
+                        delta[:, :, mask2] -= m1*target.mean(dim=2, keepdim=True).to(delta.device)
             f = partial(add_activations, delta)
             hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
             interventions[block] = hook
@@ -396,14 +404,16 @@ def setup_activation_interventions(blocks_to_intervene,
                     target_update = target_feats[..., to_target_features].to(device) @ sae.decoder.weight.T[to_target_features]
                     target_update = m1 * target_update.permute(0, 2, 1)
                     delta[:, :, mask1] += source_update
-                    delta[:, :, mask2] -= target_update
+                    if not only_add:
+                        delta[:, :, mask2] -= target_update
                 else:
                     source_update = stat1_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_source_features]
                     source_update = m1 * source_update.permute(0, 2, 1)
                     target_update = stat2_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_target_features]
                     target_update = m1 * target_update.permute(0, 2, 1)
                     delta[:, :, mask1] += source_update
-                    delta[:, :, mask2] -= target_update
+                    if not only_add:
+                        delta[:, :, mask2] -= target_update
             else:
                 if maintain_spatial_info:
                     source_update = stat1_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_source_features]
@@ -411,14 +421,16 @@ def setup_activation_interventions(blocks_to_intervene,
                     target_update = target_feats[..., to_target_features].to(device) @ sae.decoder.weight.T[to_target_features]
                     target_update = m1 * target_update.permute(0, 2, 1)
                     delta[:, :, mask2] += source_update
-                    delta[:, :, mask2] -= target_update
+                    if not only_add:
+                        delta[:, :, mask2] -= target_update
                 else:
                     source_update = stat1_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_source_features]
                     source_update = m1 * source_update.permute(0, 2, 1)
                     target_update = stat2_val.unsqueeze(1).to(device) @ sae.decoder.weight.T[to_target_features]
                     target_update = m1 * target_update.permute(0, 2, 1)
                     delta[:, :, mask2] += source_update
-                    delta[:, :, mask2] -= target_update
+                    if not only_add:
+                        delta[:, :, mask2] -= target_update
 
             f = partial(add_activations, delta)
             hook = TimedHook(f, n_steps, apply_at_steps=list(range(n_steps)))
@@ -444,8 +456,12 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
          blocks_to_intervene=["down.2.1", "up.0.1", "up.0.0", "mid.0"],
          n_steps=1, m1=1., k_transfer=10, 
          stat: Literal["max", "mean", "quantile"] = "quantile", 
-         mode: Literal["steering", "sae", "neurons"] = "sae",  
-         combine_blocks=True, use_source_mask_in_both=False, subtract_target_add_source=False,
+         mode: Literal["steering", "sae", "neurons", "sae_adaptive"] = "sae",  
+         combine_blocks=True, 
+         use_source_mask_in_both=False, 
+         use_target_mask_in_both=False,
+         subtract_target_add_source=False,
+         only_add = False, 
          maintain_spatial_info=False, 
          aggregate_timesteps: Literal["first", "mean"] = "first", 
          verbose=False,
@@ -530,9 +546,13 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
     if mask1.sum() == 0 or mask2.sum() == 0:
         raise ValueError("one of the masks is empty")
     if use_source_mask_in_both:
-        detections2, labels2, annotated_frame2 = detections1, labels1, annotated_frame1
+        # detections2, labels2, annotated_frame2 = detections1, labels1, annotated_frame1
         mask2 = mask1
-        gsam_prompt2 = gsam_prompt1
+        # gsam_prompt2 = gsam_prompt1
+    elif use_target_mask_in_both:
+        #detections1, labels1, annotated_frame1 = detections2, labels2, annotated_frame2
+        mask1 = mask2
+        # gsam_prompt1 = gsam_prompt2
     if verbose:
         plt.imshow(mask1)
         plt.show()
@@ -574,7 +594,8 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
                                                        mode,
                                                        saes,
                                                        n_steps, 
-                                                       device)
+                                                       device,
+                                                       only_add)
     else:
         interventions = setup_neuron_interventions(blocks_to_intervene, 
                                                    to_source_features_dict, 
@@ -588,7 +609,8 @@ def run_feature_transport(prompt1, prompt2, gsam_prompt1, gsam_prompt2, pipe, gr
                                                    subtract_target_add_source, 
                                                    maintain_spatial_info, 
                                                    n_steps,
-                                                   device)
+                                                   device,
+                                                   only_add)
                 
 
     result = pipe.run_with_hooks(

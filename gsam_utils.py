@@ -6,10 +6,41 @@ from torchvision.ops import box_convert
 from typing import Tuple
 import grounding_dino.groundingdino.datasets.transforms as T
 from grounding_dino.groundingdino.util.inference import load_model, predict
+import matplotlib.pyplot as plt
 
-def resize_mask(mask, size=(16, 16)):
-    # consider all 32 by 32 windows in the mask
-    small = cv2.resize(mask.astype(np.float32), size, interpolation=cv2.INTER_LANCZOS4) > 0
+def resize_mask(mask, size=(16, 16), increase_mask=True, blur_ksize=31, blur_sigma=None):
+    """
+    Resizes the mask to the given size.
+    Optionally increases the masked area by applying Gaussian blur before resizing.
+
+    Args:
+        mask: np.ndarray
+        size: tuple, output size (h, w)
+        increase_mask: bool, whether to increase the size of the masked area before resizing
+        blur_ksize: int, kernel size for GaussianBlur (should be odd)
+        blur_sigma: float or None, standard deviation for GaussianBlur.
+            If None, selects sigma automatically as blur_ksize/6 following OpenCV guidance.
+
+    Returns:
+        bool np.ndarray of shape `size`
+    """
+
+    # How to choose sigma?
+    # If blur_sigma is not provided (None), we use sigma = blur_ksize/6 as a practical rule of thumb.
+    # See OpenCV docs: https://docs.opencv.org/4.x/d4/d13/tutorial_py_filtering.html
+    proc_mask = mask.astype(np.float32)
+    if increase_mask:
+        if blur_ksize % 2 == 0:
+            blur_ksize += 1
+        sigma = blur_sigma
+        if sigma is None:
+            sigma = blur_ksize / 6.0
+        proc_mask = cv2.GaussianBlur(proc_mask, (blur_ksize, blur_ksize), sigma)
+        proc_mask = proc_mask > 0
+
+    small = cv2.resize(proc_mask.astype(np.float32), size, interpolation=cv2.INTER_LANCZOS4) > 0
+    #plt.imshow(small)
+    #plt.show()
     if small.astype(np.float32).sum() == 0:
         tmp = mask.reshape(16, 32, 16, 32).astype(np.float32)
         tmp = tmp.sum(axis=1)
